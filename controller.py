@@ -66,14 +66,20 @@ def smooth(prev, cur, alpha):
         prev[1] + alpha * (cur[1] - prev[1])
     )
 
-# FIX 1: Re-anchor prev_cursor when sensitivity changes so cursor doesn't jump.
-# We convert the current screen pixel position BACK into the raw nose-mapped space
-# under the NEW scaling factor, so the very next frame produces the same screen position.
-def reanchor_cursor(screen_x, screen_y, new_factor):
-    """Convert screen coords back to raw space for new scaling factor."""
-    raw_x = (screen_x + (new_factor - 1) * screen_w / 2) / new_factor
-    raw_y = (screen_y + (new_factor - 1) * screen_h / 2) / new_factor
-    return (raw_x, raw_y)
+# ===================== SENSITIVITY HELPER =====================
+def apply_sensitivity(new_factor):
+    """
+    Switch SCALING_FACTOR without letting the cursor jump or snap to centre.
+    Reads the real OS cursor position and re-anchors prev_cursor there.
+    """
+    global SCALING_FACTOR, prev_cursor
+    SCALING_FACTOR = new_factor
+    if prev_cursor is not None:
+        actual_x, actual_y = pyautogui.position()
+        prev_cursor = (
+            float(clamp(actual_x, 5, screen_w - 5)),
+            float(clamp(actual_y, 5, screen_h - 5))
+        )
 
 # ===================== VOICE SETUP =====================
 model = Model(MODEL_PATH)
@@ -127,7 +133,7 @@ def execute_keyboard(text):
         pyautogui.write(chars, interval=0.02)
         return True
 
-    return False  # Nothing matched
+    return False
 
 # ===================== MAIN =====================
 def main():
@@ -140,7 +146,9 @@ def main():
     print("👈 Tilt LEFT  = Keyboard Mode")
     print("🎙 Say 'exit system' to close")
     print("🔻 Default Sensitivity: LOW (say 'low', 'medium', 'high' to change)")
-    print("⌨  In Keyboard Mode: speak normally to type | say 'so <command>' for actions\n")
+    print("🖱 Mouse Mode: say 'click', 'right click', 'double click', 'drag', 'stop drag'")
+    print("⌨  Keyboard Mode: speak normally to type | say 'so <command>' for actions")
+    print("   └─ 'so back' = 3 backspaces\n")
 
     cap = cv2.VideoCapture(0)
     mp_mesh = mp.solutions.face_mesh.FaceMesh(refine_landmarks=True)
@@ -238,73 +246,60 @@ def main():
                         print("⏹ Cursor Stopped")
 
                     # ===== SENSITIVITY COMMANDS =====
-                    # FIX 1: Re-anchor prev_cursor to current screen position
-                    # before changing SCALING_FACTOR so cursor doesn't jump to center
-                    elif text in ("high", "hey", "i"):
-                        if prev_cursor is not None:
-                            cx = clamp(int(prev_cursor[0]), 5, screen_w - 5)
-                            cy = clamp(int(prev_cursor[1]), 5, screen_h - 5)
-                            SCALING_FACTOR = SENSITIVITY["high"]
-                            prev_cursor = reanchor_cursor(cx, cy, SCALING_FACTOR)
-                        else:
-                            SCALING_FACTOR = SENSITIVITY["high"]
+                    elif text in ("high", "hey", "i", "fast"):
+                        apply_sensitivity(SENSITIVITY["high"])
                         print("🔺 Sensitivity: HIGH")
 
                     elif text == "medium":
-                        if prev_cursor is not None:
-                            cx = clamp(int(prev_cursor[0]), 5, screen_w - 5)
-                            cy = clamp(int(prev_cursor[1]), 5, screen_h - 5)
-                            SCALING_FACTOR = SENSITIVITY["medium"]
-                            prev_cursor = reanchor_cursor(cx, cy, SCALING_FACTOR)
-                        else:
-                            SCALING_FACTOR = SENSITIVITY["medium"]
+                        apply_sensitivity(SENSITIVITY["medium"])
                         print("🔹 Sensitivity: MEDIUM")
 
                     elif text in ("low", "slow", "hello"):
-                        if prev_cursor is not None:
-                            cx = clamp(int(prev_cursor[0]), 5, screen_w - 5)
-                            cy = clamp(int(prev_cursor[1]), 5, screen_h - 5)
-                            SCALING_FACTOR = SENSITIVITY["low"]
-                            prev_cursor = reanchor_cursor(cx, cy, SCALING_FACTOR)
-                        else:
-                            SCALING_FACTOR = SENSITIVITY["low"]
+                        apply_sensitivity(SENSITIVITY["low"])
                         print("🔻 Sensitivity: LOW")
 
-                    # ===== MOUSE COMMANDS =====
-                    elif mouse_mode and text.startswith(COMMAND_PREFIX):
-                        cmd = text.replace(COMMAND_PREFIX, "")
+                    # ===== MOUSE COMMANDS (no "so" prefix needed) =====
+                    elif mouse_mode and text == "click":
+                        pyautogui.click()
+                        print("🖱 Click")
 
-                        if cmd == "click":
-                            pyautogui.click()
+                    elif mouse_mode and text == "right click":
+                        pyautogui.rightClick()
+                        print("🖱 Right Click")
 
-                        elif cmd == "right click":
-                            pyautogui.rightClick()
+                    elif mouse_mode and text == "double click":
+                        pyautogui.doubleClick()
+                        print("🖱 Double Click")
 
-                        elif cmd == "double click":
-                            pyautogui.doubleClick()
+                    # FIX: wrap the OR alternatives in parentheses so the
+                    # whole condition is evaluated correctly.
+                    # Old (broken): mouse_mode and text == "drag" or "brad" and not drag_active
+                    #   → "brad" is a non-empty string, always True → drag fires on every command
+                    # Fixed: mouse_mode and (text == "drag" or text == "brad") and not drag_active
+                    elif mouse_mode and (text == "drag" or text == "brad") and not drag_active:
+                        pyautogui.mouseDown()
+                        drag_active = True
+                        print("🖱 Drag Started")
 
-                        elif cmd == "drag" and not drag_active:
-                            pyautogui.mouseDown()
-                            drag_active = True
-                            print("🖱 Drag Started")
+                    elif mouse_mode and (text == "stop drag" or text == "stop brad") and drag_active:
+                        pyautogui.mouseUp()
+                        drag_active = False
+                        print("🖱 Drag Stopped")
 
-                        elif cmd == "stop drag" and drag_active:
-                            pyautogui.mouseUp()
-                            drag_active = False
-                            print("🖱 Drag Stopped")
+                    # ===== KEYBOARD COMMANDS ("so" prefix required) =====
+                    elif keyboard_mode and text.startswith(COMMAND_PREFIX):
+                        cmd = text.replace(COMMAND_PREFIX, "").strip()
+
+                        # "so back" → press backspace 3 times
+                        if cmd == "back":
+                            for _ in range(3):
+                                keyboard.press_and_release("backspace")
+                            print("⌫⌫⌫ Triple Backspace")
 
                         else:
-                            print(f"⚠ Unknown mouse command: 'so {cmd}' — ignored")
-
-                    # ===== KEYBOARD COMMANDS =====
-                    elif keyboard_mode and text.startswith(COMMAND_PREFIX):
-                        # FIX 2: Try to execute as a keyboard command.
-                        # If the command is NOT recognised, do NOT type it —
-                        # just warn the user instead.
-                        executed = execute_keyboard(text)
-                        if not executed:
-                            cmd = text.replace(COMMAND_PREFIX, "").strip()
-                            print(f"⚠ Unknown keyboard command: 'so {cmd}' — ignored (not typed)")
+                            executed = execute_keyboard(text)
+                            if not executed:
+                                print(f"⚠ Unknown keyboard command: 'so {cmd}' — ignored (not typed)")
 
                     elif keyboard_mode:
                         # Plain speech (no "so " prefix) → type it normally
