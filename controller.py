@@ -19,11 +19,11 @@ SMOOTHING_ALPHA = 0.18
 
 SENSITIVITY = {
     "low":    2.0,
-    "medium": 4.5,
-    "high":   8.0
+    "medium": 5.5,
+    "high":   9.0
 }
 
-SCALING_FACTOR = SENSITIVITY["low"]
+SCALING_FACTOR = SENSITIVITY["high"]
 
 screen_w, screen_h = pyautogui.size()
 NOSE_IDX = 1
@@ -38,7 +38,10 @@ prev_cursor = None
 last_switch_time = 0
 SWITCH_COOLDOWN = 1.5
 
-COMMAND_PREFIX = "so "
+last_click_time = 0
+CLICK_COOLDOWN = 1.5
+
+COMMAND_PREFIX = "so"
 
 # ===================== KEY MAP =====================
 KEY_MAP = {
@@ -54,6 +57,74 @@ KEY_MAP = {
     "question":"?","exclamation":"!","colon":":","semicolon":";"
 }
 
+# ===================== COMMAND SYNONYMS =====================
+COMMAND_SYNONYMS = {
+    # --- exit ---
+    "exit system": [
+        "exit system", "exit sistem", "exit this system", "exit the system",
+        "egg system", "exist system", "exit systems", "exit sistem"
+    ],
+    # --- cursor control ---
+    "start cursor": [
+        "start cursor", "start cursor please", "start the cursor",
+        "store cursor", "start coarser", "start curser"
+    ],
+    "stop cursor": [
+        "stop cursor", "stop the cursor", "stop curser",
+        "shop cursor", "top cursor", "stop coarser"
+    ],
+    # --- sensitivity ---
+    "high": [
+        "high", "hey", "i", "fast", "hi", "hai", "hye",
+        "hide", "hire", "higher", "hike", "height", "tied"
+    ],
+    "medium": [
+        "medium", "median", "medium speed", "media", "meet him",
+        "met him", "medium sensitivity", "need him"
+    ],
+    "low": [
+        "low", "slow", "hello", "below", "flow", "glow",
+        "lo", "law", "allow", "lower", "low speed"
+    ],
+    "click": [
+        "click", "clic", "klick", "click please", "creek",
+        "lick", "tick", "brick", "flick", "sick",
+        "clique", "klik", "clk", "clek", "clik",
+        "a click", "one click", "do click", "please click",
+        "quick", "quake", "clock", "clip", "clicked",
+        "clique", "clack", "cluck", "cloc", "clee",
+        "glik", "glic", "glick", "klic", "klek",
+        "click it", "click now", "just click",
+        "the it", "digg", "dig", "link", "lik", "lick it",
+        "dig it", "thick", "tic", "dic", "dik", "tik",
+        "chick", "chic", "chik", "kik", "kic", "keck",
+        "it", "get", "kit", "bit", "hit", "sit", "fit", "mit",
+        "pick", "kick", "nick", "wick", "rick", "dick", "tic tac"
+    ],
+    "right click": [
+        "right click", "right clic", "write click", "right klick",
+        "right creek", "rice click", "ride click", "right lick",
+        "right quick", "right klik", "right clique", "right clek",
+        "right clip", "right clack", "write clic", "write klick",
+        "right click please", "do right click", "right clicked"
+    ],
+    "double click": [
+        "double click", "double clic", "double klick", "durable click",
+        "trouble click", "double creek", "double lick", "dub click",
+        "double klik", "double clique", "double clek", "double clip",
+        "double clack", "double quick", "to double click", "double clicked",
+        "double click please", "dbl click", "dubble click", "doble click"
+    ],
+    "drag": [
+        "drag", "brad", "drug", "drake", "track", "dreg",
+        "drag please", "drab", "rag", "craig", "brag"
+    ],
+    "stop drag": [
+        "stop", "top", "shop", "cop", "mop", "drop",
+        "stop it", "stop drag", "stopped", "stomp"
+    ],
+}
+
 # ===================== UTIL =====================
 def clamp(val, minv, maxv):
     return max(minv, min(val, maxv))
@@ -66,12 +137,41 @@ def smooth(prev, cur, alpha):
         prev[1] + alpha * (cur[1] - prev[1])
     )
 
+# ===================== PHONETIC HELPER =====================
+def _soundex(word):
+    """Basic Soundex phonetic encoding."""
+    word = word.upper().strip()
+    if not word:
+        return ""
+    codes = {'BFPV': '1', 'CGJKQSXYZ': '2', 'DT': '3',
+             'L': '4', 'MN': '5', 'R': '6'}
+    result = word[0]
+    prev = '0'
+    for ch in word[1:]:
+        code = '0'
+        for letters, digit in codes.items():
+            if ch in letters:
+                code = digit
+                break
+        if code != '0' and code != prev:
+            result += code
+        prev = code
+    return (result + "000")[:4]
+
+# ===================== COMMAND MATCHER =====================
+def match_command(text, command_name):
+    text = text.strip().lower()
+    synonyms = [s.strip().lower() for s in COMMAND_SYNONYMS.get(command_name, [])]
+    if text in synonyms:
+        return True
+    if " " not in command_name and " " not in text:
+        target_codes = set(_soundex(s) for s in synonyms if " " not in s)
+        if _soundex(text) in target_codes:
+            return True
+    return False
+
 # ===================== SENSITIVITY HELPER =====================
 def apply_sensitivity(new_factor):
-    """
-    Switch SCALING_FACTOR without letting the cursor jump or snap to centre.
-    Reads the real OS cursor position and re-anchors prev_cursor there.
-    """
     global SCALING_FACTOR, prev_cursor
     SCALING_FACTOR = new_factor
     if prev_cursor is not None:
@@ -91,7 +191,6 @@ def audio_callback(indata, frames, time_info, status):
 
 # ===================== KEYBOARD EXECUTION =====================
 def execute_keyboard(text):
-    """Execute a keyboard command. Returns True if a command was matched, False otherwise."""
     text = text.replace(COMMAND_PREFIX, "").strip()
 
     shortcuts = {
@@ -135,6 +234,49 @@ def execute_keyboard(text):
 
     return False
 
+# ===================== CLICK HANDLER WITH COOLDOWN =====================
+def handle_click_commands(text):
+    global last_click_time, drag_active
+
+    now = time.time()
+
+    if mouse_mode and match_command(text, "double click"):
+        if now - last_click_time > CLICK_COOLDOWN:
+            pyautogui.doubleClick()
+            last_click_time = now
+            print("🖱 Double Click")
+        return True
+
+    elif mouse_mode and match_command(text, "right click"):
+        if now - last_click_time > CLICK_COOLDOWN:
+            pyautogui.rightClick()
+            last_click_time = now
+            print("🖱 Right Click")
+        return True
+
+    elif mouse_mode and match_command(text, "click"):
+        if now - last_click_time > CLICK_COOLDOWN:
+            pyautogui.click()
+            last_click_time = now
+            print("🖱 Click")
+        return True
+
+    elif mouse_mode and match_command(text, "drag") and not drag_active:
+        if now - last_click_time > CLICK_COOLDOWN:
+            pyautogui.mouseDown()
+            drag_active = True
+            last_click_time = now
+            print("🖱 Drag Started")
+        return True
+
+    elif mouse_mode and match_command(text, "stop drag") and drag_active:
+        pyautogui.mouseUp()
+        drag_active = False
+        print("🖱 Drag Stopped")
+        return True
+
+    return False
+
 # ===================== MAIN =====================
 def main():
     global mouse_mode, keyboard_mode
@@ -145,7 +287,7 @@ def main():
     print("👉 Tilt RIGHT = Mouse Mode")
     print("👈 Tilt LEFT  = Keyboard Mode")
     print("🎙 Say 'exit system' to close")
-    print("🔻 Default Sensitivity: LOW (say 'low', 'medium', 'high' to change)")
+    print("🔻 Default Sensitivity: HIGH (say 'low', 'medium', 'high' to change)")
     print("🖱 Mouse Mode: say 'click', 'right click', 'double click', 'drag', 'stop drag'")
     print("⌨  Keyboard Mode: speak normally to type | say 'so <command>' for actions")
     print("   └─ 'so back' = 3 backspaces\n")
@@ -153,9 +295,10 @@ def main():
     cap = cv2.VideoCapture(0)
     mp_mesh = mp.solutions.face_mesh.FaceMesh(refine_landmarks=True)
 
+    # FIX 1 — blocksize reduced: 4000→1600 (100ms chunks) for faster command response
     with sd.RawInputStream(
         samplerate=SAMPLE_RATE,
-        blocksize=4000,
+        blocksize=1600,
         dtype="int16",
         channels=1,
         callback=audio_callback
@@ -207,6 +350,13 @@ def main():
                     raw_x = nx * screen_w * SCALING_FACTOR - (SCALING_FACTOR - 1) * screen_w / 2
                     raw_y = ny * screen_h * SCALING_FACTOR - (SCALING_FACTOR - 1) * screen_h / 2
 
+                    # FIX 2 — UNSTICKY EDGES:
+                    # Clamp the RAW position before smoothing so prev_cursor never
+                    # accumulates an out-of-bounds value. Without this, prev_cursor
+                    # drifts deep into the clamped wall and the cursor won't move
+                    # back until enough smooth() iterations "unwind" that drift.
+                    raw_x = clamp(raw_x, 5, screen_w - 5)
+                    raw_y = clamp(raw_y, 5, screen_h - 5)
                     raw = (raw_x, raw_y)
 
                     prev_cursor = smooth(prev_cursor, raw, SMOOTHING_ALPHA)
@@ -218,8 +368,18 @@ def main():
                     )
 
             # ================= VOICE COMMANDS =================
-            if not audio_q.empty():
+            # FIX 3 — DRAIN the queue each frame so audio never falls behind.
+            # Previously a single audio_q.empty() check meant chunks pile up
+            # during heavy CPU frames, causing recognition to lag by seconds.
+            while not audio_q.empty():
                 data = audio_q.get()
+
+                # Check partial results for low-latency click detection
+                partial_raw = json.loads(recognizer.PartialResult())
+                partial_text = partial_raw.get("partial", "").strip().lower()
+
+                if partial_text and mouse_mode:
+                    handle_click_commands(partial_text)
 
                 if recognizer.AcceptWaveform(data):
                     result = json.loads(recognizer.Result())
@@ -231,79 +391,54 @@ def main():
                     print("🎙", text)
 
                     # ===== EXIT SYSTEM =====
-                    if text == "exit system":
+                    if match_command(text, "exit system"):
                         print("🛑 Shutting Down System...")
-                        break
+                        cap.release()
+                        cv2.destroyAllWindows()
+                        return
 
                     # ===== CURSOR CONTROL =====
-                    elif text == "start cursor":
+                    elif match_command(text, "start cursor"):
                         cursor_active = True
                         prev_cursor   = None
                         print("▶ Cursor Started")
 
-                    elif text == "stop cursor":
+                    elif match_command(text, "stop cursor"):
                         cursor_active = False
                         print("⏹ Cursor Stopped")
 
                     # ===== SENSITIVITY COMMANDS =====
-                    elif text in ("high", "hey", "i", "fast"):
+                    elif match_command(text, "high"):
                         apply_sensitivity(SENSITIVITY["high"])
                         print("🔺 Sensitivity: HIGH")
 
-                    elif text == "medium":
+                    elif match_command(text, "medium"):
                         apply_sensitivity(SENSITIVITY["medium"])
                         print("🔹 Sensitivity: MEDIUM")
 
-                    elif text in ("low", "slow", "hello"):
+                    elif match_command(text, "low"):
                         apply_sensitivity(SENSITIVITY["low"])
                         print("🔻 Sensitivity: LOW")
 
-                    # ===== MOUSE COMMANDS (no "so" prefix needed) =====
-                    elif mouse_mode and text == "click":
-                        pyautogui.click()
-                        print("🖱 Click")
+                    # ===== MOUSE COMMANDS — routed through cooldown-guarded handler =====
+                    elif not handle_click_commands(text):
 
-                    elif mouse_mode and text == "right click":
-                        pyautogui.rightClick()
-                        print("🖱 Right Click")
+                        # ===== KEYBOARD COMMANDS ("so" prefix required) =====
+                        if keyboard_mode and text.startswith(COMMAND_PREFIX):
+                            cmd = text.replace(COMMAND_PREFIX, "").strip()
 
-                    elif mouse_mode and text == "double click":
-                        pyautogui.doubleClick()
-                        print("🖱 Double Click")
+                            if cmd == "back":
+                                for _ in range(4):
+                                    keyboard.press_and_release("backspace")
+                                print("⌫⌫⌫ Triple Backspace")
 
-                    # FIX: wrap the OR alternatives in parentheses so the
-                    # whole condition is evaluated correctly.
-                    # Old (broken): mouse_mode and text == "drag" or "brad" and not drag_active
-                    #   → "brad" is a non-empty string, always True → drag fires on every command
-                    # Fixed: mouse_mode and (text == "drag" or text == "brad") and not drag_active
-                    elif mouse_mode and (text == "drag" or text == "brad") and not drag_active:
-                        pyautogui.mouseDown()
-                        drag_active = True
-                        print("🖱 Drag Started")
+                            else:
+                                executed = execute_keyboard(text)
+                                if not executed:
+                                    print(f"⚠ Unknown keyboard command: 'so {cmd}' — ignored (not typed)")
 
-                    elif mouse_mode and (text == "stop drag" or text == "stop brad") and drag_active:
-                        pyautogui.mouseUp()
-                        drag_active = False
-                        print("🖱 Drag Stopped")
-
-                    # ===== KEYBOARD COMMANDS ("so" prefix required) =====
-                    elif keyboard_mode and text.startswith(COMMAND_PREFIX):
-                        cmd = text.replace(COMMAND_PREFIX, "").strip()
-
-                        # "so back" → press backspace 3 times
-                        if cmd == "back":
-                            for _ in range(3):
-                                keyboard.press_and_release("backspace")
-                            print("⌫⌫⌫ Triple Backspace")
-
-                        else:
-                            executed = execute_keyboard(text)
-                            if not executed:
-                                print(f"⚠ Unknown keyboard command: 'so {cmd}' — ignored (not typed)")
-
-                    elif keyboard_mode:
-                        # Plain speech (no "so " prefix) → type it normally
-                        pyautogui.write(text + " ", interval=0.02)
+                        elif keyboard_mode:
+                            pyautogui.write(text + " ", interval=0.02)
 
             # ================= DISPLAY MODE ON FRAME =================
             mode_text  = "MOUSE MODE" if mouse_mode else "KEYBOARD MODE"
